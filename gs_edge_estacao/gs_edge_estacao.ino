@@ -1,30 +1,8 @@
 /*
   ============================================================================
   GLOBAL SOLUTION 2026  -  EDGE COMPUTING & COMPUTER SYSTEMS  (FIAP - 1o ano)
-  Tema: SPACE CONNECT  -  tecnologia espacial a servico dos desafios da Terra
   ----------------------------------------------------------------------------
   Projeto: ESTACAO EDGE DE MONITORAMENTO CLIMATICO E DE QUEIMADAS
-           ("Ground Station" terrestre que complementa a constelacao de
-            satelites de observacao da Terra)
-
-  PROBLEMA: satelites cobrem grandes areas, porem tem alta latencia e baixa
-  revisita; nao detectam, em tempo real e no nivel do solo, o inicio de uma
-  queimada ou de uma anomalia climatica. Internet/nuvem nem sempre existe no
-  campo (florestas, areas rurais, reservas).
-
-  SOLUCAO (Edge Computing): uma estacao autonoma processa TUDO localmente e
-  so transmite ao satelite o que realmente importa.
-
-  Conceitos de Edge Computing aplicados neste codigo:
-   1. Coleta multi-sensor na BORDA (no proprio local monitorado).
-   2. Pre-processamento local: media movel para reduzir ruido das leituras.
-   3. Fusao de sensores -> Indice de Risco (0-100) calculado LOCALMENTE.
-   4. Decisao de BAIXA LATENCIA: aciona LED/buzzer/LCD na hora, sem nuvem.
-   5. HISTERESE na maquina de estados: evita o alarme "piscar" no limiar.
-   6. Transmissao ORIENTADA A EVENTO: o "uplink" para o satelite (Serial) so
-      acontece quando o estado muda ou no heartbeat periodico -> economiza
-      banda e energia do enlace de satelite (envia telemetria resumida em vez
-      de dados brutos continuos).
 
   ODS atendidos: 13 (acao climatica), 11 (cidades sustentaveis),
                   9 (inovacao/infraestrutura), 15 (vida terrestre).
@@ -50,24 +28,17 @@ const uint8_t PIN_LED_AMARELO  = 7;   // Estado ALERTA
 const uint8_t PIN_LED_VERMELHO = 8;   // Estado CRITICO
 const uint8_t PIN_BUZZER       = 9;   // Alarme sonoro
 
-// LCD 16x2 em modo 4 bits -> LiquidCrystal(RS, E, D4, D5, D6, D7)
 LiquidCrystal lcd(12, 11, 5, 4, 3, 2);
 
-// --------------------------- PARAMETROS DE EDGE -----------------------------
 const unsigned long INTERVALO_AMOSTRAGEM_MS = 500;    // 2 leituras por segundo
 const unsigned long INTERVALO_HEARTBEAT_MS  = 15000;  // uplink resumo a cada 15s
 const uint8_t N_AMOSTRAS = 8;                          // janela da media movel
 
-// Limiares com HISTERESE (sobe num nivel, desce noutro -> sem flapping)
 const int RISCO_SOBE_ALERTA   = 40;
 const int RISCO_DESCE_ALERTA  = 30;
 const int RISCO_SOBE_CRITICO  = 70;
 const int RISCO_DESCE_CRITICO = 60;
 
-// Pesos da fusao de sensores (somam 1.0)
-// Fumaca tem o maior peso (sinal mais direto de combustao); calor confirma o
-// foco. Assim, 1 sensor saturado gera ALERTA, mas o CRITICO exige a FUSAO de
-// fumaca + calor -> reduz falso-positivo (boa pratica de decisao na borda).
 const float PESO_TEMP   = 0.40;
 const float PESO_FUMACA = 0.50;
 const float PESO_CHAMA  = 0.10;
@@ -81,7 +52,6 @@ enum Estado { NORMAL, ALERTA, CRITICO };
 Estado estadoAtual = NORMAL;
 Estado estadoAnterior = NORMAL;
 
-// Buffers da media movel
 int bufTemp[N_AMOSTRAS];
 int bufGas[N_AMOSTRAS];
 int bufLum[N_AMOSTRAS];
@@ -121,26 +91,22 @@ void setup() {
   Serial.println(F("=== Estacao Edge de Monitoramento Climatico - ONLINE ==="));
   Serial.println(F("Edge: coleta -> filtra -> funde -> decide local; uplink por evento."));
 
-  delay(1500);   // splash inicial (unico delay bloqueante, so na partida)
   lcd.clear();
 }
 
-// ================================ LOOP ======================================
 void loop() {
   unsigned long agora = millis();
 
-  // ---------- 1) AMOSTRAGEM PERIODICA (nao bloqueante) ----------
+  // ---------- 1) AMOSTRAGEM PERIODICA ----------
   if (agora - tUltimaAmostra >= INTERVALO_AMOSTRAGEM_MS) {
     tUltimaAmostra = agora;
 
-    // Coleta na borda
     bufTemp[idxBuf] = analogRead(PIN_TMP36);
     bufLum[idxBuf]  = analogRead(PIN_LDR);
     bufGas[idxBuf]  = analogRead(PIN_GAS);
     idxBuf++;
     if (idxBuf >= N_AMOSTRAS) { idxBuf = 0; bufCheio = true; }
 
-    // ---------- 2) PRE-PROCESSAMENTO LOCAL (media movel) ----------
     int rawTemp = mediaMovel(bufTemp);
     int rawLum  = mediaMovel(bufLum);
     int rawGas  = mediaMovel(bufGas);
@@ -149,7 +115,6 @@ void loop() {
     int   lumPct    = map(rawLum, 0, 1023, 0, 100);
     int   fumacaPct = map(rawGas, 0, 1023, 0, 100);
 
-    // ---------- 3) FUSAO DE SENSORES -> INDICE DE RISCO ----------
     float scoreTemp = (tempC - TEMP_MIN_RISCO) * 100.0 / (TEMP_MAX_RISCO - TEMP_MIN_RISCO);
     scoreTemp = clamp0a100(scoreTemp);
     float scoreFumaca = fumacaPct;
@@ -159,14 +124,11 @@ void loop() {
                            PESO_FUMACA * scoreFumaca +
                            PESO_CHAMA  * scoreChama);
 
-    // ---------- 4) MAQUINA DE ESTADOS COM HISTERESE ----------
     atualizarEstado(risco);
 
-    // ---------- 5) ATUACAO LOCAL (baixa latencia) ----------
     acionarSaidas();
     atualizarLCD(tempC, fumacaPct, lumPct, risco);
 
-    // ---------- 6) UPLINK ORIENTADO A EVENTO ----------
     bool mudouEstado = (estadoAtual != estadoAnterior);
     bool heartbeat   = (agora - tUltimoHeartbeat >= INTERVALO_HEARTBEAT_MS);
     if (mudouEstado || heartbeat) {
@@ -176,13 +138,11 @@ void loop() {
     }
   }
 
-  // ---------- 7) PADRAO DO BUZZER (nao bloqueante) ----------
   gerenciarBuzzer(agora);
 }
 
 // ============================ FUNCOES AUXILIARES ============================
 
-// Media movel simples sobre a janela preenchida do buffer
 int mediaMovel(int *buf) {
   uint8_t n = bufCheio ? N_AMOSTRAS : idxBuf;
   if (n == 0) return 0;
@@ -192,7 +152,6 @@ int mediaMovel(int *buf) {
 }
 
 // Converte leitura analogica do TMP36 em graus Celsius
-// TMP36: 10 mV/C, offset de 0.5 V em 0 C ; Vref = 5 V (Arduino Uno)
 float lerTemperaturaC(int raw) {
   float tensao = raw * (5.0 / 1023.0);
   return (tensao - 0.5) * 100.0;
@@ -213,7 +172,6 @@ const char* nomeEstado() {
   return "?";
 }
 
-// Maquina de estados com histerese
 void atualizarEstado(int risco) {
   switch (estadoAtual) {
     case NORMAL:
@@ -237,7 +195,7 @@ void acionarSaidas() {
   digitalWrite(PIN_LED_VERMELHO, estadoAtual == CRITICO);
 }
 
-// Escreve uma linha de 16 colunas, preenchendo com espacos (sem flicker)
+// Escreve uma linha de 16 colunas, preenchendo com espacos
 void imprimirLinha(uint8_t linhaIdx, const char *txt) {
   char buf[17];
   uint8_t i = 0;
@@ -257,7 +215,6 @@ void atualizarLCD(float tempC, int fumacaPct, int lumPct, int risco) {
   imprimirLinha(1, l1);
 }
 
-// Buzzer com cadencia conforme o estado (nao bloqueante)
 void gerenciarBuzzer(unsigned long agora) {
   unsigned long periodo;
   if      (estadoAtual == CRITICO) periodo = 200;   // bipe rapido
@@ -272,8 +229,7 @@ void gerenciarBuzzer(unsigned long agora) {
   }
 }
 
-// "Uplink" para a rede de satelites: pacote de telemetria compacto (JSON).
-// So e chamado por EVENTO (mudanca de estado) ou no heartbeat periodico.
+// So é chamado por EVENTO (mudanca de estado) ou periódico.
 void enviarTelemetriaSatelite(float tempC, int fumacaPct, int lumPct, int risco, bool mudou) {
   Serial.println(F("------------------------------------------------"));
   Serial.print(F("[UPLINK -> SATELITE] "));
